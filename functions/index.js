@@ -11,142 +11,172 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// ==== Collections ตาม ER ====
-const USER_COL  = "user";          // user (role: 0=user, 1=rider)
+// ===== Collections =====
+const USER_COL  = "user";          // role: 0=user, 1=rider
 const ADDR_COL  = "user_address";  // address_id, user_id, address, lat, lng
 const RIDER_COL = "rider_car";     // rider_id, user_id, image_car, plate_number, car_type
+const COUNTERS  = "_counters";     // seq storage
 
-// ---------- Health ----------
-app.get("/", (_, res) => res.send("Functions API is running 🚀"));
+// ===== Health =====
+app.get("/", (_, res) => res.send("API is running 🚀"));
 
 /* -------------------------------------------------------------------------- */
-/*                               Helper functions                             */
+/*                          Auto-increment Counter                             */
 /* -------------------------------------------------------------------------- */
+async function nextId(sequence) {
+  const ref = db.collection(COUNTERS).doc(sequence);
+  const val = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.exists ? Number(snap.data().value || 0) : 0;
+    const next = current + 1;
+    if (!snap.exists) {
+      tx.set(ref, { value: next });
+    } else {
+      tx.update(ref, { value: next });
+    }
+    return next;
+  });
+  return val; // number
+}
 
-// เช็คซ้ำเบอร์ใน collection user
+/* -------------------------------------------------------------------------- */
+/*                               Helper funcs                                  */
+/* -------------------------------------------------------------------------- */
 async function assertPhoneNotDuplicate(phone) {
-  const snap = await db.collection(USER_COL)
+  const snap = await db
+    .collection(USER_COL)
     .where("phone", "==", String(phone))
     .limit(1)
     .get();
   if (!snap.empty) {
-    const owner = snap.docs[0];
-    const u = owner.data();
+    const d = snap.docs[0];
     const err = new Error("phone already exists");
     err.code = 409;
-    err.payload = { id: owner.id, phone: u.phone, name: u.name };
+    err.payload = { id: d.id, ...d.data() };
     throw err;
   }
 }
 
-// สร้าง user (คืน {id, ...data})
+function normalizeRoleInt(role) {
+  const r = Number(role ?? 0);
+  if (r !== 0 && r !== 1) {
+    const e = new Error("role must be 0 or 1");
+    e.code = 400;
+    throw e;
+  }
+  return r;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              Core creators                                  */
+/* -------------------------------------------------------------------------- */
 async function createUser({ name, password, phone, picture, role }) {
   if (!name || !password || !phone) {
     const e = new Error("name, password, phone are required");
     e.code = 400;
     throw e;
   }
-  const roleNum = role === undefined ? 0 : Number(role);
-  if (![0, 1].includes(roleNum)) {
-    const e = new Error("role must be 0 or 1");
-    e.code = 400;
-    throw e;
-  }
-
+  const roleInt = normalizeRoleInt(role);
   await assertPhoneNotDuplicate(phone);
 
-  const ref = await db.collection(USER_COL).add({
+  const idNum = await nextId("user_seq");      // 1,2,3,...
+  const id = String(idNum);
+
+  const data = {
+    user_id: idNum,
     name: String(name),
-    password: String(password),   // เดโม: เก็บตรง ๆ; โปรดใช้ bcrypt ในโปรดักชัน
+    password: String(password),                // DEMO: โปรดใช้ bcrypt ใน prod
     phone: String(phone),
     picture: picture ? String(picture) : null,
-    role: roleNum,
-  });
-  const doc = await ref.get();
-  return { id: ref.id, ...doc.data() };
+    role: roleInt,
+  };
+
+  await db.collection(USER_COL).doc(id).set(data);
+  return { id, ...data };
 }
 
-// เพิ่มที่อยู่ (คืน {id, ...})
 async function createAddress({ user_id, address, lat, lng }) {
   if (!user_id || !address) {
     const e = new Error("user_id and address are required");
     e.code = 400;
     throw e;
   }
+  const addrIdNum = await nextId("address_seq");
+  const addrId = String(addrIdNum);
+
   const payload = {
-    user_id: String(user_id),
+    address_id: addrIdNum,
+    user_id: isNaN(Number(user_id)) ? String(user_id) : Number(user_id),
     address: String(address),
-    lat: lat === undefined || lat === null ? null : Number(lat),
-    lng: lng === undefined || lng === null ? null : Number(lng),
+    lat: lat == null ? null : Number(lat),
+    lng: lng == null ? null : Number(lng),
   };
-  const ref = await db.collection(ADDR_COL).add(payload);
-  const doc = await ref.get();
-  return { id: ref.id, ...doc.data() };
+
+  await db.collection(ADDR_COL).doc(addrId).set(payload);
+  return { id: addrId, ...payload };
 }
 
-// เพิ่มข้อมูลรถไรเดอร์ (คืน {id, ...})
 async function createRiderCar({ user_id, image_car, plate_number, car_type }) {
   if (!user_id || !plate_number || !car_type) {
     const e = new Error("user_id, plate_number, car_type are required");
     e.code = 400;
     throw e;
   }
+  const riderIdNum = await nextId("rider_seq");
+  const riderId = String(riderIdNum);
+
   const payload = {
-    user_id: String(user_id),
+    rider_id: riderIdNum,
+    user_id: isNaN(Number(user_id)) ? String(user_id) : Number(user_id),
     image_car: image_car ? String(image_car) : null,
     plate_number: String(plate_number),
-    car_type: String(car_type), // e.g., "motorcycle" | "car" | "pickup"
+    car_type: String(car_type),
   };
-  const ref = await db.collection(RIDER_COL).add(payload);
-  const doc = await ref.get();
-  return { id: ref.id, ...doc.data() };
+
+  await db.collection(RIDER_COL).doc(riderId).set(payload);
+  return { id: riderId, ...payload };
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               REGISTER ROUTES                               */
+/*                               Register routes                                */
 /* -------------------------------------------------------------------------- */
-
-/**
- * POST /register/user
- * สมัครผู้ใช้ทั่วไป (role=0)
- * body:
- * {
- *   "name": "...", "phone": "...", "password": "...",
- *   "picture": "http(s)://..." (optional)
- * }
- * -> สร้าง user อย่างเดียว (ที่อยู่ค่อยยิงอีกเส้น)
- */
 app.post("/register/user", async (req, res) => {
   try {
-    const { name, phone, password, picture } = req.body ?? {};
+    const { name, phone, password, picture, address, lat, lng } = req.body ?? {};
     const user = await createUser({ name, phone, password, picture, role: 0 });
-    return res.status(201).json({ user });
+
+    let addressDoc = null;
+    // ถ้า client ส่ง address มาด้วย ⇒ insert ต่อเลย
+    if (address && String(address).trim().length > 0) {
+      try {
+        addressDoc = await createAddress({ user_id: user.id, address, lat, lng });
+      } catch (addrErr) {
+        // address fail แต่ user สำเร็จแล้ว — แจ้งกลับโดยยังคง user ไว้
+        return res.status(207).json({
+          user,
+          address: null,
+          warning: `user created but address failed: ${addrErr.message}`,
+        });
+      }
+    }
+
+    return res.status(201).json({ user, address: addressDoc });
   } catch (e) {
     return res.status(e.code || 400).json({ error: e.message, ...(e.payload || {}) });
   }
 });
 
-/**
- * POST /register/rider
- * สมัครไรเดอร์ (role=1) + บันทึกข้อมูลรถ
- * body:
- * {
- *   "name":"...", "phone":"...", "password":"...", "picture":"(optional)",
- *   "image_car":"(optional)", "plate_number":"...", "car_type":"..."
- * }
- * -> คืนทั้ง user และ rider_car
- */
 app.post("/register/rider", async (req, res) => {
   try {
     const {
       name, phone, password, picture,
-      image_car, plate_number, car_type
+      image_car, plate_number, car_type,
     } = req.body ?? {};
 
-    // 1) create user (role=1)
+    // 1) สร้าง user (role = 1)
     const user = await createUser({ name, phone, password, picture, role: 1 });
 
-    // 2) create rider_car
+    // 2) สร้างข้อมูลรถของไรเดอร์
     const rider_car = await createRiderCar({
       user_id: user.id,
       image_car,
@@ -154,53 +184,21 @@ app.post("/register/rider", async (req, res) => {
       car_type,
     });
 
+    // ✅ ไม่สร้าง address ใด ๆ และไม่คืน field address
     return res.status(201).json({ user, rider_car });
   } catch (e) {
     return res.status(e.code || 400).json({ error: e.message, ...(e.payload || {}) });
   }
 });
 
-/**
- * POST /users/:id/addresses
- * เพิ่มที่อยู่ให้ user ภายหลัง (ตามที่บอกว่า "สมัครก่อน แล้วค่อยเพิ่มที่อยู่")
- * body: { "address":"...", "lat":10.25 (optional), "lng":50.52 (optional) }
- */
-app.post("/users/:id/addresses", async (req, res) => {
-  try {
-    const user_id = String(req.params.id);
-    // ตรวจว่ามี user นี้จริง
-    const udoc = await db.collection(USER_COL).doc(user_id).get();
-    if (!udoc.exists) return res.status(404).json({ error: "user not found" });
-
-    const { address, lat, lng } = req.body ?? {};
-    const addr = await createAddress({ user_id, address, lat, lng });
-    return res.status(201).json({ address: addr });
-  } catch (e) {
-    return res.status(e.code || 400).json({ error: e.message });
-  }
-});
-
 /* -------------------------------------------------------------------------- */
-/*                            ROUTES อื่น ๆ (ของเดิม)                         */
+/*                              Other CRUD routes                               */
 /* -------------------------------------------------------------------------- */
-
-// สร้างผู้ใช้แบบ generic (ของเดิมคุณ) — คงไว้เผื่อใช้
-app.post("/users", async (req, res) => {
-  try {
-    const { name, password, phone, picture, role } = req.body ?? {};
-    const user = await createUser({ name, password, phone, picture, role });
-    res.status(201).json(user);
-  } catch (e) {
-    res.status(e.code || 400).json({ error: e.message, ...(e.payload || {}) });
-  }
-});
-
-// GET /users
 app.get("/users", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 50);
-    let q = db.collection(USER_COL).orderBy("phone", "asc").limit(limit);
-    if (req.query.startAfter) q = q.startAfter(String(req.query.startAfter));
+    let q = db.collection(USER_COL).orderBy("user_id", "asc").limit(limit);
+    if (req.query.startAfter) q = q.startAfter(Number(req.query.startAfter));
     const snap = await q.get();
     res.json({ items: snap.docs.map(d => ({ id: d.id, ...d.data() })), count: snap.size });
   } catch (e) {
@@ -208,10 +206,9 @@ app.get("/users", async (req, res) => {
   }
 });
 
-// GET /users/:id
 app.get("/users/:id", async (req, res) => {
   try {
-    const doc = await db.collection(USER_COL).doc(req.params.id).get();
+    const doc = await db.collection(USER_COL).doc(String(req.params.id)).get();
     if (!doc.exists) return res.status(404).json({ error: "not found" });
     res.json({ id: doc.id, ...doc.data() });
   } catch (e) {
@@ -219,7 +216,6 @@ app.get("/users/:id", async (req, res) => {
   }
 });
 
-// GET /users/by-phone/:phone
 app.get("/users/by-phone/:phone", async (req, res) => {
   try {
     const snap = await db.collection(USER_COL).where("phone","==",String(req.params.phone)).limit(1).get();
@@ -231,21 +227,20 @@ app.get("/users/by-phone/:phone", async (req, res) => {
   }
 });
 
-// PATCH /users/:id
 app.patch("/users/:id", async (req, res) => {
   try {
-    const ref = db.collection(USER_COL).doc(req.params.id);
+    const ref = db.collection(USER_COL).doc(String(req.params.id));
     const before = await ref.get();
     if (!before.exists) return res.status(404).json({ error: "not found" });
 
     const allowed = ["name","password","phone","picture","role"];
     const patch = {};
     for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
-    if ("role" in patch) patch.role = Number(patch.role);
+    if ("role" in patch) patch.role = normalizeRoleInt(patch.role);
 
-    if (patch.phone) {
+    if ("phone" in patch && patch.phone) {
       const dup = await db.collection(USER_COL).where("phone","==",String(patch.phone)).limit(1).get();
-      if (!dup.empty && dup.docs[0].id !== req.params.id)
+      if (!dup.empty && dup.docs[0].id !== ref.id)
         return res.status(409).json({ error: "phone already exists" });
     }
 
@@ -257,10 +252,9 @@ app.patch("/users/:id", async (req, res) => {
   }
 });
 
-// DELETE /users/:id
 app.delete("/users/:id", async (req, res) => {
   try {
-    const ref = db.collection(USER_COL).doc(req.params.id);
+    const ref = db.collection(USER_COL).doc(String(req.params.id));
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "not found" });
     await ref.delete();
@@ -270,7 +264,6 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-// POST /login (เหมือนเดิม)
 app.post("/login", async (req, res) => {
   try {
     const { phone, password } = req.body ?? {};
@@ -283,11 +276,12 @@ app.post("/login", async (req, res) => {
       .get();
 
     if (snap.empty) return res.status(401).json({ error: "invalid credentials" });
-    const u = snap.docs[0].data();
+    const d = snap.docs[0];
+    const u = d.data();
     if (String(u.password) !== String(password))
       return res.status(401).json({ error: "invalid credentials" });
 
-    res.json({ id: snap.docs[0].id, name: u.name, phone: u.phone, role: u.role });
+    res.json({ id: d.id, name: u.name, phone: u.phone, role: Number(u.role) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
