@@ -142,25 +142,13 @@ async function createRiderCar({ user_id, image_car, plate_number, car_type }) {
 /* -------------------------------------------------------------------------- */
 app.post("/register/user", async (req, res) => {
   try {
-    const { name, phone, password, picture, address, lat, lng } = req.body ?? {};
+    const { name, phone, password, picture } = req.body ?? {};
+
+    // role = 0 สำหรับผู้ใช้ทั่วไป
     const user = await createUser({ name, phone, password, picture, role: 0 });
 
-    let addressDoc = null;
-    // ถ้า client ส่ง address มาด้วย ⇒ insert ต่อเลย
-    if (address && String(address).trim().length > 0) {
-      try {
-        addressDoc = await createAddress({ user_id: user.id, address, lat, lng });
-      } catch (addrErr) {
-        // address fail แต่ user สำเร็จแล้ว — แจ้งกลับโดยยังคง user ไว้
-        return res.status(207).json({
-          user,
-          address: null,
-          warning: `user created but address failed: ${addrErr.message}`,
-        });
-      }
-    }
-
-    return res.status(201).json({ user, address: addressDoc });
+    // ✅ ไม่สร้าง user_address ในเส้นนี้
+    return res.status(201).json({ user });
   } catch (e) {
     return res.status(e.code || 400).json({ error: e.message, ...(e.payload || {}) });
   }
