@@ -288,3 +288,5 @@ app.post("/login", async (req, res) => {
 });
 
 export const api = onRequest({ region: "asia-southeast1", cors: true }, app);
+
+//จบ
